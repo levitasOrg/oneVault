@@ -1,0 +1,6 @@
+{
+  "name": "OnePassword Clone",
+  "description": "A high-fidelity clone of 1Password with local vaults, auto fill, post-quantum hybrid encryption (Kyber-RLWE + AES-256), login generator, and 1Password import switcher.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

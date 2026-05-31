@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- 1. Post-Quantum background diagonal lattice connections (Cybersecurity Green Accent) -->
+    <path
+        android:pathData="M 28,34 L 80,74"
+        android:strokeWidth="1.5"
+        android:strokeColor="#27AE60"
+        android:strokeAlpha="0.6" />
+    <path
+        android:pathData="M 80,34 L 28,74"
+        android:strokeWidth="1.5"
+        android:strokeColor="#27AE60"
+        android:strokeAlpha="0.6" />
+
+    <!-- 2. Lattice nodes / circles (Neon cyan accent) -->
+    <path
+        android:pathData="M 28,34 m -3,0 a 3,3 0 1,0 6,0 a 3,3 0 1,0 -6,0"
+        android:fillColor="#82F1FF" />
+    <path
+        android:pathData="M 80,34 m -3,0 a 3,3 0 1,0 6,0 a 3,3 0 1,0 -6,0"
+        android:fillColor="#82F1FF" />
+    <path
+        android:pathData="M 28,74 m -3,0 a 3,3 0 1,0 6,0 a 3,3 0 1,0 -6,0"
+        android:fillColor="#82F1FF" />
+    <path
+        android:pathData="M 80,74 m -3,0 a 3,3 0 1,0 6,0 a 3,3 0 1,0 -6,0"
+        android:fillColor="#82F1FF" />
+
+    <!-- 3. Outer Premium Security Shield (Ice Blue Border / Cyber Blue Accent) -->
+    <path
+        android:pathData="M 54,23 C 67.5,23 78,27 78,27 C 78,27 80,52 69,71 C 60.5,84 54,88 54,88 C 54,88 47.5,84 39,71 C 28,52 30,27 30,27 C 30,27 40.5,23 54,23 Z"
+        android:strokeWidth="3"
+        android:strokeColor="#2F80ED"
+        android:fillColor="#252F80ED" />
+
+    <!-- 4. Pure White Shackle for the Padlock (Heavy stroke) -->
+    <path
+        android:pathData="M 47,51 V 44 c 0,-3.86 3.14,-7 7,-7 c 3.86,0 7,3.14 7,7 v 7"
+        android:strokeWidth="4"
+        android:strokeColor="#FFFFFF"
+        android:strokeLineCap="round" />
+
+    <!-- 5. Pure White Padlock Body (Rounded Rect) -->
+    <path
+        android:pathData="M 43,50 h 22 a 3,3 0 0,1 3,3 v 14 a 3,3 0 0,1 -3,3 h -22 a 3,3 0 0,1 -3,-3 v -14 a 3,3 0 0,1 3,-3 Z"
+        android:fillColor="#FFFFFF" />
+
+    <!-- 6. Keyhole Cutout (Cyber Sleek - Mid Dark Theme matching background to show depth) -->
+    <path
+        android:pathData="M 54,56.3 c -1.2,0 -2.2,1.0 -2.2,2.2 c 0,1.0 0.7,1.8 1.6,2.1 l -1.2,4.8 c -0.1,0.5 0.3,0.9 0.8,0.9 h 2.0 c 0.5,0 0.9,-0.4 0.8,-0.9 l -1.2,-4.8 c 0.9,-0.3 1.6,-1.1 1.6,-2.1 c 0,-1.2 -1.0,-2.2 -2.2,-2.2 Z"
+        android:fillColor="#0D1F3D" />
+
+</vector>
