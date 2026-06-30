@@ -4,7 +4,9 @@ import android.util.Base64
 import java.security.MessageDigest
 import java.security.SecureRandom
 import javax.crypto.Cipher
+import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.PBEKeySpec
 import javax.crypto.spec.SecretKeySpec
 import kotlin.math.absoluteValue
 
@@ -189,10 +191,30 @@ class Polynomial(val coeffs: IntArray) {
 }
 
 /**
- * Post-Quantum Cryptography Hybrid Encryption Engine
+ * Post-Quantum Cryptography Hybrid Encryption Engine.
+ *
+ * SECURITY CAVEAT (read before trusting this in production):
+ * This is a *homerolled, educational* approximation of Kyber/ML-KEM, not the NIST-standardized
+ * algorithm. It lacks NTT, proper Centered Binomial Distribution sampling, and the compression
+ * steps of real ML-KEM, and it has not been independently audited. The DeterministicRandom PRNG
+ * is a SHA-256 counter construction used to regenerate Alice's key deterministically from the
+ * password — acceptable for that narrow purpose, but not a general-purpose CSPRNG.
+ *
+ * The actual confidentiality of stored data rests on the AES-256-GCM layer keyed by the
+ * PBKDF2-stretched master password (see hybridKDF), which is sound. The Kyber layer adds defense
+ * in depth but should NOT be relied on as the sole post-quantum guarantee. For a production
+ * password manager, replace this with a vetted library (e.g. BouncyCastle's ML-KEM / Tink).
  */
 object QuantumCrypto {
     private val random = SecureRandom()
+
+    // Marks the PBKDF2-based payload format. Anything without this prefix is treated as the
+    // legacy single-SHA-256 format and decrypted with legacyHybridKDF for backward compatibility.
+    private const val PAYLOAD_VERSION = "v2"
+
+    // OWASP-recommended floor for PBKDF2-HMAC-SHA256 (2023). High enough to slow brute force,
+    // low enough to stay responsive on-device since work already runs off the main thread.
+    private const val PBKDF2_ITERATIONS = 210_000
 
     // Struct holding the encapsulated key and public Kyber cipher values
     data class KyberKEM(
@@ -281,8 +303,12 @@ object QuantumCrypto {
         // Step 1: Run Kyber encapsulation to generate shared token
         val kem = encapsulate(password)
 
-        // Step 2: Combine master password and Post-Quantum Shared Key to form Hybrid Encryption Key
-        val combinedKey = hybridKDF(password, kem.sharedSecret)
+        // Step 2: Derive the AES key by stretching the master password together with the
+        // Post-Quantum shared secret through PBKDF2 (see hybridKDF). A fresh random salt per
+        // payload makes precomputation / rainbow-table attacks useless.
+        val salt = ByteArray(16)
+        random.nextBytes(salt)
+        val combinedKey = hybridKDF(password, kem.sharedSecret, salt)
 
         // Step 3: Standard AES-256-GCM authenticated encryption
         val iv = ByteArray(12)
@@ -295,35 +321,56 @@ object QuantumCrypto {
 
         val ciphertext = cipher.doFinal(plaintext.toByteArray(Charsets.UTF_8))
 
-        // Pack it all: iv | ciphertext | uHexLen | uHex | vHex
-        // We package this safely using JSON-friendly format or formatted strings
+        // Pack as v2: VERSION | iv | uHex | vHex | salt | ciphertext
         val ivBase64 = Base64.encodeToString(iv, Base64.NO_WRAP)
         val cipherBase64 = Base64.encodeToString(ciphertext, Base64.NO_WRAP)
+        val saltBase64 = Base64.encodeToString(salt, Base64.NO_WRAP)
 
-        return "$ivBase64|${kem.uHex}|${kem.vHex}|$cipherBase64"
+        return "$PAYLOAD_VERSION|$ivBase64|${kem.uHex}|${kem.vHex}|$saltBase64|$cipherBase64"
     }
 
     /**
-     * Decrypts hybrid AES payload
+     * Decrypts hybrid AES payload. Supports both the current PBKDF2-based v2 format and the
+     * legacy 4-part SHA-256 format so vaults created before the KDF upgrade still open.
      */
     fun decrypt(encryptedPayload: String, password: String): String {
         val parts = encryptedPayload.split("|")
-        if (parts.size < 4) {
-            throw IllegalArgumentException("Invalid encrypted payload format")
-        }
-        val ivBase64 = parts[0]
-        val uHex = parts[1]
-        val vHex = parts[2]
-        val cipherBase64 = parts[3]
 
-        val iv = Base64.decode(ivBase64, Base64.DEFAULT)
-        val ciphertext = Base64.decode(cipherBase64, Base64.DEFAULT)
+        val iv: ByteArray
+        val uHex: String
+        val vHex: String
+        val ciphertext: ByteArray
+        val salt: ByteArray?
+
+        when {
+            // v2: VERSION | iv | uHex | vHex | salt | ciphertext
+            parts.size >= 6 && parts[0] == PAYLOAD_VERSION -> {
+                iv = Base64.decode(parts[1], Base64.DEFAULT)
+                uHex = parts[2]
+                vHex = parts[3]
+                salt = Base64.decode(parts[4], Base64.DEFAULT)
+                ciphertext = Base64.decode(parts[5], Base64.DEFAULT)
+            }
+            // legacy v1: iv | uHex | vHex | ciphertext (SHA-256 KDF, no salt)
+            parts.size >= 4 -> {
+                iv = Base64.decode(parts[0], Base64.DEFAULT)
+                uHex = parts[1]
+                vHex = parts[2]
+                ciphertext = Base64.decode(parts[3], Base64.DEFAULT)
+                salt = null
+            }
+            else -> throw IllegalArgumentException("Invalid encrypted payload format")
+        }
 
         // Decapsulate Post-Quantum secret key
         val sharedSecret = decapsulate(password, uHex, vHex)
 
-        // Derive identical combined hybrid key
-        val combinedKey = hybridKDF(password, sharedSecret)
+        // Derive the identical combined hybrid key (PBKDF2 for v2, legacy SHA-256 for v1)
+        val combinedKey = if (salt != null) {
+            hybridKDF(password, sharedSecret, salt)
+        } else {
+            legacyHybridKDF(password, sharedSecret)
+        }
 
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         val spec = GCMParameterSpec(128, iv)
@@ -335,9 +382,23 @@ object QuantumCrypto {
     }
 
     /**
-     * Hybrid KDF that hashes traditional Master Password with Post-Quantum session secret
+     * Hybrid KDF: stretches the master password + Post-Quantum session secret through PBKDF2
+     * with a high iteration count. Stretching is what makes a stolen vault expensive to brute
+     * force — a single SHA-256 hash (the old approach) can be guessed billions of times/second
+     * on a GPU, whereas PBKDF2 with 210k iterations slows each guess by orders of magnitude.
      */
-    private fun hybridKDF(password: String, pqSecret: ByteArray): ByteArray {
+    private fun hybridKDF(password: String, pqSecret: ByteArray, salt: ByteArray): ByteArray {
+        // Bind the PQ secret to the password by appending it to the passphrase characters, so
+        // both inputs must be known to derive the key.
+        val pqHex = pqSecret.joinToString("") { "%02x".format(it) }
+        val passphrase = (password + pqHex).toCharArray()
+        val spec = PBEKeySpec(passphrase, salt, PBKDF2_ITERATIONS, 256)
+        val factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
+        return factory.generateSecret(spec).encoded
+    }
+
+    /** Legacy single-SHA-256 KDF, retained only to decrypt pre-upgrade (v1) payloads. */
+    private fun legacyHybridKDF(password: String, pqSecret: ByteArray): ByteArray {
         val md = MessageDigest.getInstance("SHA-256")
         md.update(password.toByteArray(Charsets.UTF_8))
         md.update(pqSecret)

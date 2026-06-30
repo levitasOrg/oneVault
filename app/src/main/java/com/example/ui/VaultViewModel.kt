@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.crypto.QuantumCrypto
+import com.example.crypto.SecureStore
 import com.example.crypto.VaultSession
 import com.example.data.AppDatabase
 import com.example.data.DecryptedFields
@@ -49,6 +50,20 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
 
     private val prefs = application.getSharedPreferences("onevault_prefs", android.content.Context.MODE_PRIVATE)
 
+    // Keystore-backed storage for the biometric-unlock master password. The password is
+    // never written to plain SharedPreferences; it is encrypted with a hardware-backed key.
+    private val secureStore = SecureStore(application)
+
+    init {
+        // One-time migration: if an older build left the master password in plaintext
+        // SharedPreferences, move it into the Keystore-encrypted store and scrub the original.
+        val legacyPlaintext = prefs.getString("biometric_password", null)
+        if (legacyPlaintext != null) {
+            secureStore.putString("biometric_password", legacyPlaintext)
+            prefs.edit().remove("biometric_password").apply()
+        }
+    }
+
     private val _isBiometricEnabled = MutableStateFlow(prefs.getBoolean("biometric_enabled", false))
     val isBiometricEnabled: StateFlow<Boolean> = _isBiometricEnabled.asStateFlow()
 
@@ -56,16 +71,16 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
         prefs.edit().putBoolean("biometric_enabled", enabled).apply()
         _isBiometricEnabled.value = enabled
         if (!enabled) {
-            prefs.edit().remove("biometric_password").apply()
+            secureStore.remove("biometric_password")
         }
     }
 
     fun saveBiometricPassword(password: String) {
-        prefs.edit().putString("biometric_password", password).apply()
+        secureStore.putString("biometric_password", password)
     }
 
     fun getBiometricPassword(): String? {
-        return prefs.getString("biometric_password", null)
+        return secureStore.getString("biometric_password")
     }
 
     private val _themeMode = MutableStateFlow(prefs.getString("theme_mode", "SYSTEM") ?: "SYSTEM")
@@ -119,15 +134,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
         _cloudProvider.value = provider
         _cloudUserName.value = cleanName
         _isCloudLoggedIn.value = true
-        _feedbackMessage.value = "Connected with $provider. Welcome, $cleanName!"
-    }
-
-    fun loginCloud(email: String, authCode: String): Boolean {
-        // Kept for backward compatibility but routes to social connection if needed
-        val nameFromEmail = email.substringBefore("@").replace(".", " ")
-            .split(" ")
-            .joinToString(" ") { it.replaceFirstChar { char -> if (char.isLowerCase()) char.titlecase() else char.toString() } }
-        return connectSocialCloud("Google", email, nameFromEmail.ifBlank { "Authorized User" }).let { true }
+        _feedbackMessage.value = "Backup profile set for $cleanName ($cleanEmail)."
     }
 
     fun logoutCloud() {
@@ -142,7 +149,13 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
         _cloudProvider.value = ""
         _cloudUserName.value = ""
         _isCloudLoggedIn.value = false
-        _feedbackMessage.value = "Cloud session ended. $currentEmail disconnected."
+        _feedbackMessage.value = "Backup profile $currentEmail disconnected."
+    }
+
+    /** Returns true if a local encrypted backup blob actually exists for [email]. */
+    fun hasBackupFor(email: String): Boolean {
+        val cleanEmail = email.lowercase().trim()
+        return prefs.getString("cloud_backup_email_$cleanEmail", null) != null
     }
 
     fun backupToCloud(email: String) {
@@ -170,10 +183,12 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
                     QuantumCrypto.encrypt(json, activePwd)
                 }
                 
+                // NOTE: this backup is stored locally on this device (encrypted), not uploaded
+                // to any remote server. The "cloud" labelling refers to a per-profile local slot.
                 prefs.edit().putString("cloud_backup_email_$cleanEmail", encryptedBackupPayload).apply()
-                _feedbackMessage.value = "Encrypted backup successfully synced to cloud profile!"
+                _feedbackMessage.value = "Encrypted backup saved to this device under $cleanEmail."
             } catch (e: Exception) {
-                _feedbackMessage.value = "Cloud backup failed: ${e.localizedMessage}"
+                _feedbackMessage.value = "Backup failed: ${e.localizedMessage}"
             }
         }
     }
@@ -257,11 +272,11 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 _quantumStats.value = stats
 
-                _feedbackMessage.value = "Vault database sync succeeded! Restored ${restoredItems.size} items."
+                _feedbackMessage.value = "Restored ${restoredItems.size} items from local encrypted backup."
                 onSuccess()
 
             } catch (e: Exception) {
-                onError("Cloud restore sync failed: ${e.localizedMessage}")
+                onError("Restore failed: ${e.localizedMessage}")
             }
         }
     }
@@ -309,12 +324,20 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
                 // Skip verification metadata item
                 if (item.category == "MASTER_VERIFICATION") return@filter false
 
-                val matchesSearch = item.title.contains(query, ignoreCase = true) ||
-                        item.website.contains(query, ignoreCase = true)
                 val matchesCategory = category == "ALL" || item.category == category
                 val matchesVault = vault == "ALL" || item.vaultName == vault
+                if (!matchesCategory || !matchesVault) return@filter false
 
-                matchesSearch && matchesCategory && matchesVault
+                if (query.isBlank()) return@filter true
+
+                // Fast path: match on the unencrypted metadata (title/website) first.
+                val metaMatch = item.title.contains(query, ignoreCase = true) ||
+                        item.website.contains(query, ignoreCase = true)
+                if (metaMatch) return@filter true
+
+                // Slow path: when the vault is unlocked, also search inside the decrypted fields
+                // (username, notes, full name, email) so search isn't limited to title/website.
+                matchesDecryptedFields(item, query)
             }
         }.flowOn(Dispatchers.Default).stateIn(
             scope = viewModelScope,
@@ -392,14 +415,18 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
     /**
      * Unlock the vault using the entered master password
      */
-    fun unlockVault(password: String): Boolean {
-        var success = false
+    /**
+     * Attempts to unlock the vault. The result is delivered reactively via [isLocked] and
+     * [feedbackMessage] because decryption runs on a background coroutine — there is no
+     * meaningful synchronous boolean to return (the previous version always returned false).
+     */
+    fun unlockVault(password: String) {
         viewModelScope.launch {
             try {
                 // Search for the verification item
                 val items = allItems.value
                 val tokenItem = items.find { it.category == "MASTER_VERIFICATION" }
-                
+
                 if (tokenItem == null) {
                     _feedbackMessage.value = "Database error: token not set!"
                     return@launch
@@ -416,8 +443,11 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
                         QuantumCrypto.getQuantumStats(password)
                     }
                     _quantumStats.value = stats
-                    _feedbackMessage.value = "Access Granted. Quantum security layer active."
-                    success = true
+                    _feedbackMessage.value = if (com.example.crypto.DeviceSecurity.isDeviceRooted()) {
+                        "Access Granted. Warning: this device appears rooted — vault protections are weaker here."
+                    } else {
+                        "Access Granted. Quantum security layer active."
+                    }
                 } else {
                     _feedbackMessage.value = "Access Denied: Incorrect master password!"
                 }
@@ -425,7 +455,6 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
                 _feedbackMessage.value = "Access Denied: Incorrect master password!"
             }
         }
-        return success
     }
 
     fun lockVault() {
@@ -463,6 +492,21 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
         } catch (e: Exception) {
             null
         }
+    }
+
+    /**
+     * Returns true if [query] matches any non-secret-ish searchable field inside the decrypted
+     * payload (username, notes, full name, email). Used as the slow path for search so users can
+     * find items by username or note text, not just title/website. Returns false if the vault is
+     * locked (decryptItem yields null) — we never decrypt without an active session.
+     */
+    private fun matchesDecryptedFields(item: VaultItem, query: String): Boolean {
+        val fields = decryptItem(item) ?: return false
+        return fields.username.contains(query, ignoreCase = true) ||
+                fields.customNotes.contains(query, ignoreCase = true) ||
+                fields.fullName.contains(query, ignoreCase = true) ||
+                fields.email.contains(query, ignoreCase = true) ||
+                fields.cardholderName.contains(query, ignoreCase = true)
     }
 
     /**
@@ -542,7 +586,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
      * 1Password backup switcher/importer.
      * Handles both standard 1Password CSV headers and JSON formats (.1pux items).
      */
-    fun importFromOnePassword(importText: String): Int {
+    fun importFromOnePassword(importText: String, targetVault: String = "Personal"): Int {
         val password = VaultSession.getActivePassword() ?: return 0
         if (importText.isBlank()) return 0
 
@@ -551,10 +595,10 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
         try {
             if (importText.trim().startsWith("{") || importText.trim().startsWith("[")) {
                 // Dynamic JSON Parsing
-                importedCount = parseOnePasswordJson(importText, password)
+                importedCount = parseOnePasswordJson(importText, password, targetVault)
             } else {
                 // CSV Parsing
-                importedCount = parseOnePasswordCsv(importText, password)
+                importedCount = parseOnePasswordCsv(importText, password, targetVault)
             }
 
             if (importedCount > 0) {
@@ -569,7 +613,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
         return importedCount
     }
 
-    private fun parseOnePasswordJson(jsonText: String, activePwd: String): Int {
+    private fun parseOnePasswordJson(jsonText: String, activePwd: String, targetVault: String): Int {
         var count = 0
         try {
             // Support simple JSON lists of credential maps
@@ -599,7 +643,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
                             category = if (category in listOf("LOGIN", "CARD", "NOTE", "IDENTITY")) category else "LOGIN",
                             website = fields.website,
                             encryptedPayload = payload,
-                            vaultName = "Personal"
+                            vaultName = targetVault
                         )
                         withContext(Dispatchers.IO) {
                             repository.insert(dbItem)
@@ -635,7 +679,8 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
                                     title = title,
                                     category = "LOGIN",
                                     website = website,
-                                    encryptedPayload = payload
+                                    encryptedPayload = payload,
+                                    vaultName = targetVault
                                 )
                             )
                         }
@@ -648,7 +693,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun parseOnePasswordCsv(csvText: String, activePwd: String): Int {
+    private fun parseOnePasswordCsv(csvText: String, activePwd: String, targetVault: String): Int {
         val lines = csvText.lines()
         if (lines.size <= 1) return 0
 
@@ -693,7 +738,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
                         category = if (passwordVal.isNotEmpty()) "LOGIN" else "NOTE",
                         website = website,
                         encryptedPayload = payload,
-                        vaultName = "Personal"
+                        vaultName = targetVault
                     )
                     withContext(Dispatchers.IO) {
                         repository.insert(item)

@@ -58,6 +58,13 @@ android {
   testOptions { unitTests { isIncludeAndroidResources = true } }
 }
 
+// Export the Room schema to version control so future schema changes can be diffed and migrated
+// safely (paired with exportSchema = true on AppDatabase). Without this, destructive wipes were
+// the only "migration" path.
+ksp {
+  arg("room.schemaLocation", "$projectDir/schemas")
+}
+
 // Configure the Secrets Gradle Plugin to use .env and .env.example files
 // to match the convention used in Web projects.
 secrets {
@@ -91,6 +98,10 @@ dependencies {
   // implementation(libs.androidx.navigation.compose)
   implementation(libs.androidx.room.ktx)
   implementation(libs.androidx.room.runtime)
+  // Encrypts the Room database at rest (SQLCipher). The passphrase is held in the
+  // Android Keystore via SecureStore, so the on-disk DB file is unreadable without the device key.
+  implementation(libs.sqlcipher.android)
+  implementation(libs.androidx.sqlite.ktx)
   // implementation(libs.coil.compose)
   implementation(libs.converter.moshi)
   // implementation(libs.firebase.ai)

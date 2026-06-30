@@ -4,10 +4,6 @@ import android.content.Context
 import android.content.Intent
 import android.os.Bundle
 import android.provider.Settings
-import android.webkit.WebView
-import android.webkit.WebViewClient
-import android.webkit.CookieManager
-import androidx.compose.ui.viewinterop.AndroidView
 import androidx.fragment.app.FragmentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -54,14 +50,29 @@ import com.example.crypto.VaultSession
 import com.example.data.DecryptedFields
 import com.example.data.VaultItem
 import com.example.ui.VaultViewModel
+import com.example.ui.components.ClipboardDisplayRow
+import com.example.ui.components.SensitiveClipboardDisplayRow
+import com.example.ui.components.secureCopyToClipboard
 import com.example.ui.theme.MyApplicationTheme
 
 class MainActivity : FragmentActivity() {
+
+    private var appViewModel: VaultViewModel? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // FLAG_SECURE prevents screenshots, screen recording, and the app appearing in the
+        // recent-apps thumbnail — all of which could leak plaintext passwords on screen.
+        window.setFlags(
+            android.view.WindowManager.LayoutParams.FLAG_SECURE,
+            android.view.WindowManager.LayoutParams.FLAG_SECURE
+        )
+
         enableEdgeToEdge()
         setContent {
             val viewModel: VaultViewModel = viewModel()
+            appViewModel = viewModel
             val themeMode by viewModel.themeMode.collectAsStateWithLifecycle()
             val isDark = when (themeMode) {
                 "LIGHT" -> false
@@ -76,6 +87,16 @@ class MainActivity : FragmentActivity() {
                     OneVaultApp(viewModel)
                 }
             }
+        }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        // Auto-lock when the app leaves the foreground, so a stolen unlocked phone does not expose
+        // the vault. The user re-authenticates (master password or biometric) on return.
+        // isChangingConfigurations guards against locking on rotation.
+        if (!isChangingConfigurations) {
+            appViewModel?.lockVault()
         }
     }
 }
@@ -314,17 +335,22 @@ fun MasterSetupScreen(
 @Composable
 fun MasterUnlockScreen(
     viewModel: VaultViewModel,
-    onUnlock: (String) -> Boolean
+    onUnlock: (String) -> Unit
 ) {
     var password by remember { mutableStateOf("") }
     var passwordVisible by remember { mutableStateOf(false) }
-    var showSimulatedScanner by remember { mutableStateOf(false) }
+    var biometricUnavailable by remember { mutableStateOf(false) }
 
     val isBiometricEnabled by viewModel.isBiometricEnabled.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val activity = context as? FragmentActivity
 
-    // Instantly invoke verification if biometric is active
+    // Invoke the REAL OS biometric prompt if biometric unlock is enabled.
+    //
+    // The previous build had a fake "simulated scanner": an animated progress bar that then
+    // unlocked using the stored password without any actual authentication. That is a security
+    // bypass (anyone holding the phone could trigger it), so it is removed. If the real prompt
+    // is unavailable, we fall back to requiring the master password — never an auto-unlock.
     LaunchedEffect(isBiometricEnabled) {
         if (isBiometricEnabled) {
             launchRealBiometrics(
@@ -334,69 +360,10 @@ fun MasterUnlockScreen(
                     onUnlock(masterPassword)
                 },
                 onFallbackSimulated = {
-                    showSimulatedScanner = true
+                    biometricUnavailable = true
                 }
             )
         }
-    }
-
-    if (showSimulatedScanner) {
-        AlertDialog(
-            onDismissRequest = { showSimulatedScanner = false },
-            title = {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = Icons.Filled.Fingerprint,
-                        contentDescription = "Simulated Scan",
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(32.dp).padding(end = 8.dp)
-                    )
-                    Text("Biometric Signature Scan", color = MaterialTheme.colorScheme.onSurface)
-                }
-            },
-            text = {
-                var scanProgress by remember { mutableStateOf(0f) }
-                LaunchedEffect(Unit) {
-                    while (scanProgress < 1f) {
-                        kotlinx.coroutines.delay(100)
-                        scanProgress += 0.1f
-                    }
-                    val pwd = viewModel.getBiometricPassword()
-                    if (pwd != null) {
-                        onUnlock(pwd)
-                    }
-                    showSimulatedScanner = false
-                }
-
-                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
-                    Text(
-                        text = if (scanProgress >= 1f) "Fingerprint Verified! Unlocking..." else "Scanning biometric signature contours...",
-                        fontSize = 13.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        textAlign = TextAlign.Center
-                    )
-                    Spacer(modifier = Modifier.height(16.dp))
-                    LinearProgressIndicator(
-                        progress = { scanProgress },
-                        modifier = Modifier.fillMaxWidth().height(8.dp),
-                        color = MaterialTheme.colorScheme.primary,
-                        trackColor = MaterialTheme.colorScheme.surfaceVariant
-                    )
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Text(
-                        text = "Verifying secure local key storage mapping...",
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
-                    )
-                }
-            },
-            confirmButton = {},
-            dismissButton = {
-                TextButton(onClick = { showSimulatedScanner = false }) {
-                    Text("Cancel", color = MaterialTheme.colorScheme.primary)
-                }
-            }
-        )
     }
 
     Column(
@@ -476,7 +443,7 @@ fun MasterUnlockScreen(
                         activity = activity,
                         viewModel = viewModel,
                         onSuccess = { masterPassword -> onUnlock(masterPassword) },
-                        onFallbackSimulated = { showSimulatedScanner = true }
+                        onFallbackSimulated = { biometricUnavailable = true }
                     )
                 },
                 modifier = Modifier.size(64.dp),
@@ -499,6 +466,16 @@ fun MasterUnlockScreen(
                 fontSize = 12.sp,
                 color = MaterialTheme.colorScheme.onBackground,
                 fontWeight = FontWeight.SemiBold
+            )
+        }
+
+        if (biometricUnavailable) {
+            Spacer(modifier = Modifier.height(12.dp))
+            Text(
+                text = "Biometric unlock isn't available right now. Please enter your master password.",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.error,
+                textAlign = TextAlign.Center
             )
         }
 
@@ -1107,8 +1084,8 @@ fun StandaloneGeneratorTab(viewModel: VaultViewModel) {
     var includeSymbols by remember { mutableStateOf(true) }
     var useWords by remember { mutableStateOf(false) }
     var generatedPwd by remember { mutableStateOf("") }
-    
-    val clipboardManager = LocalClipboardManager.current
+
+    val context = LocalContext.current
     val scrollState = rememberScrollState()
 
     LaunchedEffect(length, includeUpper, includeLower, includeDigits, includeSymbols, useWords) {
@@ -1174,7 +1151,7 @@ fun StandaloneGeneratorTab(viewModel: VaultViewModel) {
                         IconButton(
                             onClick = {
                                 if (generatedPwd.isNotEmpty()) {
-                                    clipboardManager.setText(AnnotatedString(generatedPwd))
+                                    secureCopyToClipboard(context, "Generated Password", generatedPwd, sensitive = true)
                                 }
                             }
                         ) {
@@ -1362,6 +1339,7 @@ fun StandaloneGeneratorTab(viewModel: VaultViewModel) {
 @Composable
 fun ImportDataTab(viewModel: VaultViewModel) {
     var importText by remember { mutableStateOf("") }
+    var targetVault by remember { mutableStateOf("Personal") }
     val scrollState = rememberScrollState()
 
     Column(
@@ -1415,10 +1393,36 @@ fun ImportDataTab(viewModel: VaultViewModel) {
                     maxLines = 10
                 )
 
+                // Let the user choose which vault imported items land in (previously hardcoded
+                // to "Personal", so Work/Private imports were impossible).
+                Text(
+                    text = "Import into vault",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 12.dp, bottom = 4.dp)
+                )
+                Row(modifier = Modifier.fillMaxWidth()) {
+                    listOf("Personal", "Work", "Private").forEach { v ->
+                        val isSel = targetVault == v
+                        Button(
+                            onClick = { targetVault = v },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (isSel) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.surfaceVariant,
+                                contentColor = if (isSel) MaterialTheme.colorScheme.onTertiary else MaterialTheme.colorScheme.onSurfaceVariant
+                            ),
+                            modifier = Modifier.weight(1f).padding(2.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp)
+                        ) {
+                            Text(v, fontSize = 11.sp)
+                        }
+                    }
+                }
+
                 Button(
                     onClick = {
                         if (importText.isNotEmpty()) {
-                            viewModel.importFromOnePassword(importText)
+                            viewModel.importFromOnePassword(importText, targetVault)
                             importText = ""
                         }
                     },
@@ -1465,32 +1469,16 @@ fun SocialConnectDialog(
     onDismiss: () -> Unit,
     onConnect: (email: String, name: String) -> Unit
 ) {
+    // Honest local-profile dialog.
+    //
+    // The previous implementation loaded the real Google/Microsoft/Yahoo login pages inside a
+    // WebView, sniffed session cookies, and then fabricated a "successful OAuth handshake" without
+    // ever exchanging a token. That is indistinguishable from credential phishing and is removed.
+    //
+    // OneVault stores backups locally on-device, so all we actually need is a label (display name
+    // + email) for the local backup slot. No remote login, no cookies, no tokens.
     var email by remember { mutableStateOf("") }
     var name by remember { mutableStateOf("") }
-    var authStep by remember { mutableStateOf("INTRO") } // INTRO, SECURE_WEB, VERIFYING, SUCCESS
-    var currentUrl by remember { mutableStateOf("") }
-    var webLoading by remember { mutableStateOf(false) }
-    var isAuthConfirmed by remember { mutableStateOf(false) }
-
-    val initialUrl = when (provider.lowercase()) {
-        "google" -> "https://accounts.google.com/ServiceLogin?service=mail&continue=https://mail.google.com/mail/"
-        "microsoft" -> "https://login.live.com/login.srf"
-        "yahoo" -> "https://login.yahoo.com/"
-        else -> "https://accounts.google.com/"
-    }
-
-    LaunchedEffect(provider) {
-        val domain = when (provider.lowercase()) {
-            "google" -> "gmail.com"
-            "microsoft" -> "outlook.com"
-            "yahoo" -> "yahoo.com"
-            else -> "mail.com"
-        }
-        val userEmail = "secure-user@$domain"
-        email = userEmail
-        name = "Secure Sync User"
-        currentUrl = initialUrl
-    }
 
     val providerColor = when (provider.lowercase()) {
         "google" -> Color(0xFF4285F4)
@@ -1499,12 +1487,10 @@ fun SocialConnectDialog(
         else -> MaterialTheme.colorScheme.primary
     }
 
+    val emailLooksValid = email.contains("@") && email.contains(".") && email.length >= 5
+
     AlertDialog(
-        onDismissRequest = { 
-            if (authStep != "VERIFYING") {
-                onDismiss() 
-            }
-        },
+        onDismissRequest = onDismiss,
         title = {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(
@@ -1522,332 +1508,88 @@ fun SocialConnectDialog(
                     Icon(icon, contentDescription = provider, tint = providerColor, modifier = Modifier.size(18.dp))
                 }
                 Spacer(modifier = Modifier.width(10.dp))
-                Text(
-                    text = when (authStep) {
-                        "INTRO" -> "Link $provider"
-                        "SECURE_WEB" -> "SSL Login Portal"
-                        "VERIFYING" -> "Verifying..."
-                        "SUCCESS" -> "Handshake Verified"
-                        else -> "Link $provider"
-                    },
-                    fontWeight = FontWeight.Bold, 
-                    fontSize = 18.sp
-                )
+                Text("Set up $provider backup profile", fontWeight = FontWeight.Bold, fontSize = 18.sp)
             }
         },
         text = {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = 480.dp)
-            ) {
-                when (authStep) {
-                    "INTRO" -> {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    text = "This labels a local, on-device backup slot. OneVault does not sign in to $provider or upload anything to a remote server — your encrypted vault stays on this device.",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    lineHeight = 16.sp
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("Display Name") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(8.dp)
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+
+                OutlinedTextField(
+                    value = email,
+                    onValueChange = { email = it },
+                    label = { Text("Profile Email (label only)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(8.dp)
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+                Card(
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.2f)
+                    ),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Lock,
+                            contentDescription = "Local only",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "To sync your post-quantum wrapped database, establish a direct, official authentication connection to $provider. No passwords or tokens are stored on OneVault servers.",
-                            fontSize = 12.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            lineHeight = 16.sp
+                            text = "Backups are encrypted with your master password and saved locally. Keep your master password safe — it is the only way to restore them.",
+                            fontSize = 10.sp,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                            lineHeight = 14.sp
                         )
-                        Spacer(modifier = Modifier.height(12.dp))
-
-                        OutlinedTextField(
-                            value = name,
-                            onValueChange = { name = it },
-                            label = { Text("Display Name") },
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(8.dp)
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-
-                        OutlinedTextField(
-                            value = email,
-                            onValueChange = { email = it },
-                            label = { Text("Provider Account Email") },
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(8.dp)
-                        )
-                        
-                        Spacer(modifier = Modifier.height(8.dp))
-                        
-                        Card(
-                            colors = CardDefaults.cardColors(
-                                containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.2f)
-                            ),
-                            shape = RoundedCornerShape(8.dp)
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(10.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Filled.Lock,
-                                    contentDescription = "Shield",
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text(
-                                    text = "This session will launch the official authentication portal of $provider directly via WebView. Check the SSL green lock.",
-                                    fontSize = 10.sp,
-                                    color = MaterialTheme.colorScheme.onPrimaryContainer,
-                                    lineHeight = 14.sp
-                                )
-                            }
-                        }
-                    }
-                    "SECURE_WEB" -> {
-                        // SSL Lock & Address Indicator
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(Color(0xFFE8F5E9), RoundedCornerShape(6.dp))
-                                .padding(horizontal = 8.dp, vertical = 6.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Filled.Lock,
-                                contentDescription = "Secure SSL Connection",
-                                tint = Color(0xFF2E7D32),
-                                modifier = Modifier.size(14.dp)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = "🔒 " + currentUrl.take(45) + (if (currentUrl.length > 45) "..." else ""),
-                                fontSize = 10.sp,
-                                fontFamily = FontFamily.Monospace,
-                                color = Color(0xFF2E7D32),
-                                maxLines = 1,
-                                modifier = Modifier.weight(1f)
-                            )
-                            if (webLoading) {
-                                CircularProgressIndicator(modifier = Modifier.size(10.dp), strokeWidth = 1.dp, color = Color(0xFF2E7D32))
-                            }
-                        }
-                        
-                        Spacer(modifier = Modifier.height(8.dp))
-
-                        // Interactive real browser session wrapping Webview!
-                        Box(
-                            modifier = Modifier
-                                .weight(1f)
-                                .fillMaxWidth()
-                                .border(BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant), RoundedCornerShape(8.dp))
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(Color.White)
-                        ) {
-                            AndroidView(
-                                factory = { ctx ->
-                                    WebView(ctx).apply {
-                                        settings.apply {
-                                            javaScriptEnabled = true
-                                            domStorageEnabled = true
-                                            databaseEnabled = true
-                                            // Legitimate chrome browser user agent to bypass WebView-disallowed policies
-                                            userAgentString = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
-                                            loadWithOverviewMode = true
-                                            useWideViewPort = true
-                                        }
-                                        webViewClient = object : android.webkit.WebViewClient() {
-                                            override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
-                                                webLoading = true
-                                                url?.let { 
-                                                    currentUrl = it 
-                                                }
-                                            }
-
-                                            override fun onPageFinished(view: WebView?, url: String?) {
-                                                webLoading = false
-                                                url?.let { finishedUrl ->
-                                                    currentUrl = finishedUrl
-                                                    
-                                                    // Detect login triggers based on cookie headers and successful oauth redirects!
-                                                    val cookieManager = CookieManager.getInstance()
-                                                    val cookies = cookieManager.getCookie(finishedUrl) ?: ""
-                                                    
-                                                    val hasGoogleSession = provider.lowercase() == "google" && 
-                                                            (finishedUrl.contains("myaccount.google.com") || finishedUrl.contains("mail.google.com") || cookies.contains("SID=") || cookies.contains("SSID="))
-                                                    
-                                                    val hasMicrosoftSession = provider.lowercase() == "microsoft" && 
-                                                            (finishedUrl.contains("account.microsoft.com") || finishedUrl.contains("outlook.live.com") || cookies.contains("RPSSecAuth") || cookies.contains("MSFPC"))
-                                                    
-                                                    val hasYahooSession = provider.lowercase() == "yahoo" && 
-                                                            (finishedUrl.contains("mail.yahoo.com") || finishedUrl.contains("yahoo.com/member") || cookies.contains("Y=") || cookies.contains("T="))
-
-                                                    if (hasGoogleSession || hasMicrosoftSession || hasYahooSession) {
-                                                        isAuthConfirmed = true
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        loadUrl(initialUrl)
-                                    }
-                                },
-                                modifier = Modifier.fillMaxSize()
-                            )
-                        }
-                        
-                        Spacer(modifier = Modifier.height(8.dp))
-
-                        Card(
-                            colors = CardDefaults.cardColors(
-                                containerColor = if (isAuthConfirmed) Color(0xFFE8F5E9) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
-                            ),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Column(modifier = Modifier.padding(8.dp)) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(
-                                        imageVector = if (isAuthConfirmed) Icons.Filled.CheckCircle else Icons.Filled.Info,
-                                        contentDescription = "Verify status",
-                                        tint = if (isAuthConfirmed) Color(0xFF2E7D32) else MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text(
-                                        text = if (isAuthConfirmed) "Sign-in Success Detected" else "Awaiting Authentication Session",
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = if (isAuthConfirmed) Color(0xFF2E7D32) else MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
-                                
-                                Text(
-                                    text = if (isAuthConfirmed) 
-                                        "Legitimate active cookies found! Please click 'Verify & Sync Connection' below to confirm identity."
-                                        else "Sign in with your $provider credentials in the secure window above to capture connection.",
-                                    fontSize = 10.sp,
-                                    lineHeight = 14.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
-                                    modifier = Modifier.padding(top = 2.dp)
-                                )
-                            }
-                        }
-                    }
-                    "VERIFYING" -> {
-                        Spacer(modifier = Modifier.height(24.dp))
-                        Column(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
-                            CircularProgressIndicator(modifier = Modifier.size(44.dp), strokeWidth = 3.dp, color = providerColor)
-                            Spacer(modifier = Modifier.height(16.dp))
-                            Text(
-                                text = "Running double-check cryptographic handshake with $provider Secure Token Service...",
-                                fontSize = 12.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                textAlign = TextAlign.Center,
-                                lineHeight = 16.sp
-                            )
-                        }
-                    }
-                    "SUCCESS" -> {
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Column(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(60.dp)
-                                    .background(Color(0xFF4CAF50).copy(alpha = 0.15f), CircleShape),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Filled.CheckCircle,
-                                    contentDescription = "Success",
-                                    tint = Color(0xFF4CAF50),
-                                    modifier = Modifier.size(36.dp)
-                                )
-                            }
-                            Spacer(modifier = Modifier.height(16.dp))
-                            Text(
-                                text = "Secure Credentials Bound!",
-                                fontSize = 16.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = Color(0xFF4CAF50)
-                            )
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Text(
-                                text = "Legitimate login verified! Identity $email is securely linked using authenticated OIDC tokens. Your post-quantum master key remains safe locally.",
-                                fontSize = 12.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                textAlign = TextAlign.Center,
-                                lineHeight = 16.sp
-                            )
-                        }
                     }
                 }
             }
         },
         confirmButton = {
-            when (authStep) {
-                "INTRO" -> {
-                    Button(
-                        onClick = {
-                            if (email.isNotBlank() && name.isNotBlank()) {
-                                authStep = "SECURE_WEB"
-                            }
-                        },
-                        colors = ButtonDefaults.buttonColors(containerColor = providerColor, contentColor = Color.White),
-                        enabled = email.isNotBlank() && name.isNotBlank()
-                    ) {
-                        Text("Connect Securely")
+            Button(
+                onClick = {
+                    if (name.isNotBlank() && emailLooksValid) {
+                        onConnect(email.trim(), name.trim())
                     }
-                }
-                "SECURE_WEB" -> {
-                    Button(
-                        onClick = {
-                            authStep = "VERIFYING"
-                        },
-                        colors = ButtonDefaults.buttonColors(containerColor = providerColor, contentColor = Color.White),
-                        enabled = true 
-                    ) {
-                        Text(if (isAuthConfirmed) "Verify & Sync Connection" else "Manual Confirm Sign-In")
-                    }
-                }
-                "SUCCESS" -> {
-                    Button(
-                        onClick = {
-                            onConnect(email, name)
-                        },
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4CAF50), contentColor = Color.White)
-                    ) {
-                        Text("Finalize Integration")
-                    }
-                }
-                else -> { /* Loading/processing - no action button */ }
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = providerColor, contentColor = Color.White),
+                enabled = name.isNotBlank() && emailLooksValid
+            ) {
+                Text("Save Profile")
             }
         },
         dismissButton = {
-            if (authStep == "INTRO" || authStep == "SECURE_WEB" || authStep == "SUCCESS") {
-                TextButton(
-                    onClick = {
-                        if (authStep == "SECURE_WEB") {
-                            authStep = "INTRO"
-                        } else {
-                            onDismiss()
-                        }
-                    }
-                ) {
-                    Text(if (authStep == "SECURE_WEB") "Back" else "Cancel")
-                }
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
             }
         },
         shape = RoundedCornerShape(16.dp),
         containerColor = MaterialTheme.colorScheme.surface,
         tonalElevation = 6.dp
     )
-    
-    // Auto transition out of VERIFYING
-    LaunchedEffect(authStep) {
-        if (authStep == "VERIFYING") {
-            kotlinx.coroutines.delay(2000)
-            authStep = "SUCCESS"
-        }
-    }
 }
 
 @Composable
@@ -2248,8 +1990,17 @@ fun SettingsMenuTab(viewModel: VaultViewModel) {
                     Button(
                         onClick = {
                             try {
+                                // Build the autofill-service URI from the runtime applicationId
+                                // (context.packageName) plus the real, compile-checked class name.
+                                // This avoids the earlier fragile mismatch where the package id
+                                // (com.aistudio.*) and the source package (com.example.*) were
+                                // mixed by hand in a string literal.
+                                val component = android.content.ComponentName(
+                                    context.packageName,
+                                    com.example.autofill.OneVaultAutofillService::class.java.name
+                                )
                                 val intent = Intent(Settings.ACTION_REQUEST_SET_AUTOFILL_SERVICE).apply {
-                                    data = Uri.parse("package:${context.packageName}/com.example.autofill.OneVaultAutofillService")
+                                    data = Uri.parse("package:${component.packageName}/${component.className}")
                                 }
                                 context.startActivity(intent)
                             } catch (e: Exception) {
@@ -3079,71 +2830,6 @@ fun ItemDetailDialog(
     )
 }
 
-@Composable
-fun ClipboardDisplayRow(label: String, value: String, clipboardManager: androidx.compose.ui.platform.ClipboardManager) {
-    if (value.isEmpty()) return
-    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-        Text(text = label, fontSize = 11.sp, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(text = value, fontSize = 14.sp, modifier = Modifier.weight(1f))
-            Spacer(modifier = Modifier.width(8.dp))
-            IconButton(
-                onClick = { clipboardManager.setText(AnnotatedString(value)) },
-                modifier = Modifier.size(36.dp)
-            ) {
-                Icon(Icons.Filled.ContentCopy, contentDescription = "Copy text", modifier = Modifier.size(16.dp))
-            }
-        }
-    }
-}
-
-@Composable
-fun SensitiveClipboardDisplayRow(label: String, value: String, clipboardManager: androidx.compose.ui.platform.ClipboardManager) {
-    if (value.isEmpty()) return
-    var visible by remember { mutableStateOf(false) }
-    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-        Text(text = label, fontSize = 11.sp, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = if (visible) value else "••••••••••••",
-                fontFamily = FontFamily.Monospace,
-                fontSize = 14.sp,
-                modifier = Modifier.weight(1f)
-            )
-            Spacer(modifier = Modifier.width(8.dp))
-            Row {
-                IconButton(
-                    onClick = { visible = !visible },
-                    modifier = Modifier.size(36.dp)
-                ) {
-                    Icon(
-                        imageVector = if (visible) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
-                        contentDescription = "Show/Hide",
-                        modifier = Modifier.size(16.dp)
-                    )
-                }
-                IconButton(
-                    onClick = { clipboardManager.setText(AnnotatedString(value)) },
-                    modifier = Modifier.size(36.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Filled.ContentCopy,
-                        contentDescription = "Copy text",
-                        modifier = Modifier.size(16.dp)
-                    )
-                }
-            }
-        }
-    }
-}
 
 @Composable
 fun CloudRestoreDialog(
@@ -3252,8 +2938,15 @@ fun CloudRestoreDialog(
 
                         Spacer(modifier = Modifier.height(12.dp))
 
+                        // Only claim a backup exists if one actually does for this profile.
+                        val backupExists = remember(cloudEmail) { viewModel.hasBackupFor(cloudEmail) }
+
                         Text(
-                            text = "A validated copy of your vault was found under $cloudEmail ($cloudUserName). To import and lock your cloud sync, you must verify the Master Password used to encrypt it.",
+                            text = if (backupExists) {
+                                "An encrypted backup was found under $cloudEmail ($cloudUserName). To import it, verify the Master Password used to encrypt it."
+                            } else {
+                                "No backup was found under $cloudEmail. Create one first from the Profile tab (Sync Backup) while your vault is unlocked."
+                            },
                             fontSize = 12.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             lineHeight = 16.sp,
@@ -3265,6 +2958,7 @@ fun CloudRestoreDialog(
                                 restoreTargetEmail = cloudEmail
                                 showMasterKeyDialog = true
                             },
+                            enabled = backupExists,
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = MaterialTheme.colorScheme.primary,
                                 contentColor = MaterialTheme.colorScheme.onPrimary

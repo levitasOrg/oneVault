@@ -12,7 +12,6 @@ import android.view.WindowManager
 import android.widget.Toast
 import android.content.ClipboardManager
 import android.content.ClipData
-import android.app.ActivityManager
 import androidx.compose.animation.*
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
@@ -418,7 +417,7 @@ class FloatingHoverService : Service() {
                 }
                 IconButton(
                     onClick = {
-                        clipboard.setPrimaryClip(ClipData.newPlainText(label, value))
+                        copyToClipboard(clipboard, label, value, isSensitive)
                         Toast.makeText(this@FloatingHoverService, "$label copied", Toast.LENGTH_SHORT).show()
                     },
                     modifier = Modifier.size(28.dp)
@@ -702,92 +701,30 @@ class FloatingHoverService : Service() {
         }
     }
 
-    private fun triggerAutoCapture() {
-        val masterPassword = VaultSession.getActivePassword()
-        if (masterPassword == null) {
-            Toast.makeText(this, "Unlock OneVault to auto-capture credentials!", Toast.LENGTH_LONG).show()
-            return
-        }
-
-        // 1. Identify current screen / foreground context package
-        val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-        val rawPackage = try {
-            am.runningAppProcesses?.firstOrNull()?.processName ?: "com.android.chrome"
-        } catch (e: Exception) {
-            "com.android.chrome"
-        }
-
-        val appName = when {
-            rawPackage.contains("spotify") -> "Spotify"
-            rawPackage.contains("instagram") -> "Instagram"
-            rawPackage.contains("facebook") -> "Facebook"
-            rawPackage.contains("twitter") -> "Twitter"
-            rawPackage.contains("chrome") -> "Google Chrome"
-            rawPackage.contains("youtube") -> "YouTube"
-            rawPackage.contains("netflix") -> "Netflix"
-            rawPackage.contains("amazon") -> "Amazon"
-            rawPackage.contains("github") -> "GitHub"
-            rawPackage.contains("google") -> "Google"
-            else -> {
-                val lastSegment = rawPackage.split(".").lastOrNull() ?: "Web Portal"
-                lastSegment.replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
+    /**
+     * Copies to the clipboard, flagging sensitive values (Android 13+) and auto-clearing them
+     * after a delay so a copied password/CVV/PIN does not linger for other apps.
+     */
+    private fun copyToClipboard(clipboard: ClipboardManager, label: String, value: String, sensitive: Boolean) {
+        val clip = ClipData.newPlainText(label, value)
+        if (sensitive && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            clip.description.extras = android.os.PersistableBundle().apply {
+                putBoolean("android.content.extra.IS_SENSITIVE", true)
             }
         }
+        clipboard.setPrimaryClip(clip)
 
-        // 2. Scan clipboard for pre-copied credentials
-        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        var capturedUsername = "user@example.com" // safe default fallback
-        var capturedPassword = "OneVaultQC-${(1000..9999).random()}"
-
-        if (clipboard.hasPrimaryClip()) {
-            val clipText = clipboard.primaryClip?.getItemAt(0)?.text?.toString() ?: ""
-            if (clipText.contains("@")) {
-                capturedUsername = clipText
-            } else if (clipText.isNotEmpty() && clipText.length in 6..32) {
-                capturedPassword = clipText
-            }
-        }
-
-        // 3. Encrypt post-quantum hybrid structure
-        serviceScope.launch {
-            try {
-                val fields = DecryptedFields(
-                    username = capturedUsername,
-                    secretText = capturedPassword,
-                    website = "https://www.${appName.lowercase().replace(" ", "")}.com",
-                    customNotes = "Auto-captured via Hover service overlay."
-                )
-                val json = fieldsAdapter.toJson(fields)
-                val encrypted = withContext(Dispatchers.Default) {
-                    QuantumCrypto.encrypt(json, masterPassword)
+        if (sensitive) {
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                val current = clipboard.primaryClip?.getItemAt(0)?.text?.toString()
+                if (current == value) {
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+                        clipboard.clearPrimaryClip()
+                    } else {
+                        clipboard.setPrimaryClip(ClipData.newPlainText("", ""))
+                    }
                 }
-
-                val newItem = VaultItem(
-                    title = "$appName Portal",
-                    category = "LOGIN",
-                    vaultName = "Personal",
-                    website = "https://www.${appName.lowercase().replace(" ", "")}.com",
-                    encryptedPayload = encrypted
-                )
-
-                val db = AppDatabase.getDatabase(this@FloatingHoverService)
-                db.vaultDao().insertItem(newItem)
-
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(
-                        this@FloatingHoverService,
-                        "Successfully Captured: Saved encrypted login structure for $appName!",
-                        Toast.LENGTH_LONG
-                    ).show()
-                    isExpandedState = false
-                    updateParams(false)
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(this@FloatingHoverService, "Auto-Capture failed: ${e.message}", Toast.LENGTH_SHORT).show()
-                }
-            }
+            }, 30_000L)
         }
     }
 
