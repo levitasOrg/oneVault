@@ -102,6 +102,8 @@ dependencies {
   // Android Keystore via SecureStore, so the on-disk DB file is unreadable without the device key.
   implementation(libs.sqlcipher.android)
   implementation(libs.androidx.sqlite.ktx)
+  // Vetted post-quantum KEM (ML-KEM / Kyber) — replaces the homerolled lattice math for new (v3) payloads.
+  implementation(libs.bouncycastle.bcprov)
   // implementation(libs.coil.compose)
   implementation(libs.converter.moshi)
   // implementation(libs.firebase.ai)
