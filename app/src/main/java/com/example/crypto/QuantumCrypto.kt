@@ -9,6 +9,14 @@ import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.PBEKeySpec
 import javax.crypto.spec.SecretKeySpec
 import kotlin.math.absoluteValue
+import org.bouncycastle.crypto.AsymmetricCipherKeyPair
+import org.bouncycastle.pqc.crypto.mlkem.MLKEMExtractor
+import org.bouncycastle.pqc.crypto.mlkem.MLKEMGenerator
+import org.bouncycastle.pqc.crypto.mlkem.MLKEMKeyGenerationParameters
+import org.bouncycastle.pqc.crypto.mlkem.MLKEMKeyPairGenerator
+import org.bouncycastle.pqc.crypto.mlkem.MLKEMParameters
+import org.bouncycastle.pqc.crypto.mlkem.MLKEMPrivateKeyParameters
+import org.bouncycastle.pqc.crypto.mlkem.MLKEMPublicKeyParameters
 
 /**
  * Pure Kotlin deterministic Pseudo-Random Number Generator (PRNG)
@@ -208,9 +216,15 @@ class Polynomial(val coeffs: IntArray) {
 object QuantumCrypto {
     private val random = SecureRandom()
 
-    // Marks the PBKDF2-based payload format. Anything without this prefix is treated as the
-    // legacy single-SHA-256 format and decrypted with legacyHybridKDF for backward compatibility.
-    private const val PAYLOAD_VERSION = "v2"
+    // Current payload format: v3 = vetted BouncyCastle ML-KEM (Kyber) KEM + PBKDF2 + AES-256-GCM.
+    private const val PAYLOAD_VERSION_V3 = "v3"
+
+    // Legacy payload format produced by the homerolled lattice KEM. Retained for decryption only.
+    // Anything without a version prefix is the even older single-SHA-256 (v1) format.
+    private const val PAYLOAD_VERSION_V2 = "v2"
+
+    // ML-KEM parameter set. 768 ~= AES-192 category-3 security; the standard middle choice.
+    private val ML_KEM_PARAMS = MLKEMParameters.ml_kem_768
 
     // OWASP-recommended floor for PBKDF2-HMAC-SHA256 (2023). High enough to slow brute force,
     // low enough to stay responsive on-device since work already runs off the main thread.
@@ -223,8 +237,58 @@ object QuantumCrypto {
         val sharedSecret: ByteArray
     )
 
+    // ===================================================================================
+    // ===  v3: vetted ML-KEM (Kyber) via BouncyCastle                                 ===
+    // ===================================================================================
+
     /**
-     * Kyber-like Ring Learning with Errors (RLWE) Key Encapsulation Mechanism
+     * Derives the 64-byte ML-KEM keygen seed (d || z) deterministically from the master password,
+     * via PBKDF2-HMAC-SHA256 over a fixed domain-separation salt. The same password always yields
+     * the same seed (and therefore the same keypair), preserving the "password is the only secret"
+     * model: any session can regenerate Alice's keypair and decapsulate.
+     */
+    private fun deriveMlKemSeed(password: String): ByteArray {
+        // Fixed salt for domain separation. Determinism (not anti-precomputation) is the goal here;
+        // the per-payload random salt protecting the AES key still lives in hybridKDF.
+        val salt = "oneVault|ml-kem-768|seed|v3".toByteArray(Charsets.UTF_8)
+        val spec = PBEKeySpec(password.toCharArray(), salt, PBKDF2_ITERATIONS, 64 * 8)
+        val factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
+        return factory.generateSecret(spec).encoded
+    }
+
+    /** Deterministically regenerates Alice's ML-KEM keypair from the password seed. */
+    private fun deriveMlKemKeyPair(password: String): AsymmetricCipherKeyPair {
+        val seed = deriveMlKemSeed(password)
+        val d = seed.copyOfRange(0, 32)
+        val z = seed.copyOfRange(32, 64)
+        val gen = MLKEMKeyPairGenerator()
+        // init() wires up the chosen ML-KEM parameter set / engine. The SecureRandom passed here is
+        // unused by internalGenerateKeyPair (which takes explicit seeds), so a default instance is fine.
+        gen.init(MLKEMKeyGenerationParameters(random, ML_KEM_PARAMS))
+        // internalGenerateKeyPair(d, z) is the deterministic keygen taking the two 32-byte seeds.
+        return gen.internalGenerateKeyPair(d, z)
+    }
+
+    /** ML-KEM encapsulation to the password-derived public key. Returns (ciphertext, sharedSecret). */
+    private fun mlKemEncapsulate(password: String): Pair<ByteArray, ByteArray> {
+        val keyPair = deriveMlKemKeyPair(password)
+        val publicKey = keyPair.public as MLKEMPublicKeyParameters
+        val generator = MLKEMGenerator(random)
+        val secWithEnc = generator.generateEncapsulated(publicKey)
+        return Pair(secWithEnc.encapsulation, secWithEnc.secret)
+    }
+
+    /** ML-KEM decapsulation: regenerate keypair from password, extract the shared secret. */
+    private fun mlKemDecapsulate(password: String, ciphertext: ByteArray): ByteArray {
+        val keyPair = deriveMlKemKeyPair(password)
+        val privateKey = keyPair.private as MLKEMPrivateKeyParameters
+        val extractor = MLKEMExtractor(privateKey)
+        return extractor.extractSecret(ciphertext)
+    }
+
+    /**
+     * LEGACY homerolled Kyber-like KEM. Retained ONLY to decrypt pre-upgrade v1/v2 payloads and to
+     * power getQuantumStats(); new encryption uses the vetted ML-KEM path above. Not used by encrypt().
      *
      * Given a master password, we derive a deterministic uniform polynomial "A" and Alice's secret key "s".
      * Bob (creating a new item) generates a key-encapsulation token (sharedSecret), wraps it using public s,
@@ -297,18 +361,19 @@ object QuantumCrypto {
 
     /**
      * Robust Hybrid Encryption: Protects plaintext using AES-256-GCM.
-     * The AES key is derived from the Master Key blended with the encapsulated Post-Quantum Kyber Key!
+     * The AES key is derived from the master password blended with a vetted post-quantum ML-KEM
+     * (Kyber) shared secret. New payloads use the v3 format; v1/v2 remain readable for old vaults.
      */
     fun encrypt(plaintext: String, password: String): String {
-        // Step 1: Run Kyber encapsulation to generate shared token
-        val kem = encapsulate(password)
+        // Step 1: ML-KEM encapsulation to the password-derived public key -> (ciphertext, secret).
+        val (kemCiphertext, sharedSecret) = mlKemEncapsulate(password)
 
         // Step 2: Derive the AES key by stretching the master password together with the
         // Post-Quantum shared secret through PBKDF2 (see hybridKDF). A fresh random salt per
         // payload makes precomputation / rainbow-table attacks useless.
         val salt = ByteArray(16)
         random.nextBytes(salt)
-        val combinedKey = hybridKDF(password, kem.sharedSecret, salt)
+        val combinedKey = hybridKDF(password, sharedSecret, salt)
 
         // Step 3: Standard AES-256-GCM authenticated encryption
         val iv = ByteArray(12)
@@ -321,21 +386,38 @@ object QuantumCrypto {
 
         val ciphertext = cipher.doFinal(plaintext.toByteArray(Charsets.UTF_8))
 
-        // Pack as v2: VERSION | iv | uHex | vHex | salt | ciphertext
+        // Pack as v3: VERSION | iv | kemCiphertext | salt | ciphertext
         val ivBase64 = Base64.encodeToString(iv, Base64.NO_WRAP)
+        val kemBase64 = Base64.encodeToString(kemCiphertext, Base64.NO_WRAP)
         val cipherBase64 = Base64.encodeToString(ciphertext, Base64.NO_WRAP)
         val saltBase64 = Base64.encodeToString(salt, Base64.NO_WRAP)
 
-        return "$PAYLOAD_VERSION|$ivBase64|${kem.uHex}|${kem.vHex}|$saltBase64|$cipherBase64"
+        return "$PAYLOAD_VERSION_V3|$ivBase64|$kemBase64|$saltBase64|$cipherBase64"
     }
 
     /**
-     * Decrypts hybrid AES payload. Supports both the current PBKDF2-based v2 format and the
-     * legacy 4-part SHA-256 format so vaults created before the KDF upgrade still open.
+     * Decrypts a hybrid AES payload. Dispatches on the version prefix:
+     *  - v3: vetted ML-KEM (Kyber) KEM + PBKDF2 (current format).
+     *  - v2: legacy homerolled lattice KEM + PBKDF2.
+     *  - v1 (no prefix, 4 parts): legacy homerolled lattice KEM + single SHA-256 KDF.
+     * The v1/v2 paths are retained solely so vaults created before this upgrade still open.
      */
     fun decrypt(encryptedPayload: String, password: String): String {
         val parts = encryptedPayload.split("|")
 
+        // v3: VERSION | iv | kemCiphertext | salt | ciphertext  (ML-KEM)
+        if (parts.size >= 5 && parts[0] == PAYLOAD_VERSION_V3) {
+            val iv = Base64.decode(parts[1], Base64.DEFAULT)
+            val kemCiphertext = Base64.decode(parts[2], Base64.DEFAULT)
+            val salt = Base64.decode(parts[3], Base64.DEFAULT)
+            val ciphertext = Base64.decode(parts[4], Base64.DEFAULT)
+
+            val sharedSecret = mlKemDecapsulate(password, kemCiphertext)
+            val combinedKey = hybridKDF(password, sharedSecret, salt)
+            return aesGcmDecrypt(combinedKey, iv, ciphertext)
+        }
+
+        // Legacy homerolled-KEM formats (v2 / v1).
         val iv: ByteArray
         val uHex: String
         val vHex: String
@@ -343,8 +425,8 @@ object QuantumCrypto {
         val salt: ByteArray?
 
         when {
-            // v2: VERSION | iv | uHex | vHex | salt | ciphertext
-            parts.size >= 6 && parts[0] == PAYLOAD_VERSION -> {
+            // legacy v2: VERSION | iv | uHex | vHex | salt | ciphertext
+            parts.size >= 6 && parts[0] == PAYLOAD_VERSION_V2 -> {
                 iv = Base64.decode(parts[1], Base64.DEFAULT)
                 uHex = parts[2]
                 vHex = parts[3]
@@ -362,7 +444,7 @@ object QuantumCrypto {
             else -> throw IllegalArgumentException("Invalid encrypted payload format")
         }
 
-        // Decapsulate Post-Quantum secret key
+        // Decapsulate via the legacy homerolled lattice KEM.
         val sharedSecret = decapsulate(password, uHex, vHex)
 
         // Derive the identical combined hybrid key (PBKDF2 for v2, legacy SHA-256 for v1)
@@ -372,11 +454,14 @@ object QuantumCrypto {
             legacyHybridKDF(password, sharedSecret)
         }
 
+        return aesGcmDecrypt(combinedKey, iv, ciphertext)
+    }
+
+    private fun aesGcmDecrypt(key: ByteArray, iv: ByteArray, ciphertext: ByteArray): String {
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         val spec = GCMParameterSpec(128, iv)
-        val secretKeySpec = SecretKeySpec(combinedKey, "AES")
+        val secretKeySpec = SecretKeySpec(key, "AES")
         cipher.init(Cipher.DECRYPT_MODE, secretKeySpec, spec)
-
         val decryptedBytes = cipher.doFinal(ciphertext)
         return String(decryptedBytes, Charsets.UTF_8)
     }
