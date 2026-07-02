@@ -438,9 +438,19 @@ class FloatingHoverService : Service() {
         var selectedItemDetail by remember { mutableStateOf<VaultItem?>(null) }
         var detailedFields by remember { mutableStateOf<DecryptedFields?>(null) }
         var isDecryptingItem by remember { mutableStateOf(false) }
+        var page by remember { mutableStateOf(0) }
 
-        val itemsToShow = remember(allItems) {
-            allItems.filter { it.category != "MASTER_VERIFICATION" }.take(8)
+        // Paginate the dial in groups of 8 so vaults with more than 8 items are all reachable
+        // (previously only the first 8 were ever shown).
+        val pageSize = 8
+        val allVisible = remember(allItems) {
+            allItems.filter { it.category != "MASTER_VERIFICATION" }
+        }
+        val pageCount = remember(allVisible) { maxOf(1, (allVisible.size + pageSize - 1) / pageSize) }
+        // Clamp the page if the item list shrank.
+        if (page >= pageCount) page = pageCount - 1
+        val itemsToShow = remember(allVisible, page) {
+            allVisible.drop(page * pageSize).take(pageSize)
         }
 
         LaunchedEffect(selectedItemDetail) {
@@ -548,13 +558,18 @@ class FloatingHoverService : Service() {
                 }
             }
 
-            // Central Hub Menu Control representing the larger connected core circle
+            // Central Hub Menu Control representing the larger connected core circle.
+            // When there is more than one page of items, tapping the hub advances to the next page.
             Box(
                 modifier = Modifier
                     .size(76.dp)
                     .clip(CircleShape)
                     .background(MaterialTheme.colorScheme.primaryContainer)
-                    .border(3.dp, MaterialTheme.colorScheme.primary, CircleShape),
+                    .border(3.dp, MaterialTheme.colorScheme.primary, CircleShape)
+                    .then(
+                        if (pageCount > 1) Modifier.clickable { page = (page + 1) % pageCount }
+                        else Modifier
+                    ),
                 contentAlignment = Alignment.Center
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -565,7 +580,7 @@ class FloatingHoverService : Service() {
                         modifier = Modifier.size(28.dp)
                     )
                     Text(
-                        text = "Core Hub",
+                        text = if (pageCount > 1) "Page ${page + 1}/$pageCount" else "Core Hub",
                         fontSize = 8.sp,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onPrimaryContainer,

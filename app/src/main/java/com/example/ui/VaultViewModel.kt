@@ -268,7 +268,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
                 VaultSession.unlock(enteredMasterKey)
                 _isLocked.value = false
                 val stats = withContext(Dispatchers.Default) {
-                    QuantumCrypto.getQuantumStats(enteredMasterKey)
+                    quantumStatsFor(enteredMasterKey)
                 }
                 _quantumStats.value = stats
 
@@ -288,6 +288,19 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
     // Active diagnostic stats for Post-Quantum mechanics visualization
     private val _quantumStats = MutableStateFlow<Map<String, Any>>(emptyMap())
     val quantumStats: StateFlow<Map<String, Any>> = _quantumStats.asStateFlow()
+
+    // getQuantumStats is deterministic per password but non-trivial to compute (it runs the KEM
+    // keygen). Cache the last result keyed by password so re-unlocking the same vault is instant.
+    private var cachedStatsPassword: String? = null
+    private var cachedStats: Map<String, Any>? = null
+
+    private fun quantumStatsFor(password: String): Map<String, Any> {
+        cachedStats?.let { if (cachedStatsPassword == password) return it }
+        val stats = quantumStatsFor(password)
+        cachedStatsPassword = password
+        cachedStats = stats
+        return stats
+    }
 
     // Filtering states
     private val _searchQuery = MutableStateFlow("")
@@ -403,7 +416,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
                     VaultSession.unlock(password)
                     _isLocked.value = false
                     _isFirstLaunch.value = false
-                    _quantumStats.value = QuantumCrypto.getQuantumStats(password)
+                    _quantumStats.value = quantumStatsFor(password)
                 }
                 _feedbackMessage.value = "Post-Quantum Vault successfully initialized!"
             } catch (e: Exception) {
@@ -440,7 +453,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
                     VaultSession.unlock(password)
                     _isLocked.value = false
                     val stats = withContext(Dispatchers.Default) {
-                        QuantumCrypto.getQuantumStats(password)
+                        quantumStatsFor(password)
                     }
                     _quantumStats.value = stats
                     _feedbackMessage.value = if (com.example.crypto.DeviceSecurity.isDeviceRooted()) {
