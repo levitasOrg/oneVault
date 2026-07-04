@@ -9,7 +9,9 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [36])
+// Robolectric on SDK 36 needs Java 21 (DefaultSdkProvider throws under 17); pin
+// to 35 like the crypto tests so CI on JDK 17 is green.
+@Config(sdk = [35])
 class ExampleRobolectricTest {
 
   @Test
