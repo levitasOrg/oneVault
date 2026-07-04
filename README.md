@@ -4,6 +4,8 @@
 
 # Run and deploy your AI Studio app
 
+[![CI](https://github.com/levitasOrg/oneVault/actions/workflows/ci.yml/badge.svg)](https://github.com/levitasOrg/oneVault/actions/workflows/ci.yml)
+
 This contains everything you need to run your app locally.
 
 View your app in AI Studio: https://ai.studio/apps/11b4f5e0-cd79-45d0-90e2-d92af7776951
