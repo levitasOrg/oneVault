@@ -73,6 +73,16 @@ Audit each; implement what's missing; each gets a manual device-pass line in the
    onboarding; "history of generated" is explicitly OUT (never persist generated pw).
 10. **Search** across decrypted fields (#34 done) — verify perf with 500 items (must
     stay <200 ms; if not, memoize decrypted index while unlocked).
+11. **Erase everything (DPDP right-to-erasure)** — GP-4's OneVault item, confirmed
+    MISSING 2026-07-05: `VaultRepository.clear()` only deletes items; there is no
+    full wipe and `SecureStore` has no `clear()`. Build a Settings "Erase all data"
+    action, double-confirmed, that: `vaultDao.deleteAllItems()` → delete the SQLCipher
+    DB file (`context.deleteDatabase(...)`) → clear `onevault_prefs` → delete every
+    SecureStore Keystore entry (add `SecureStore.clearAll()` that removes the biometric
+    key, DB passphrase key, and any alias) → lock session → return to first-run. Note:
+    uninstalling already erases a local-only vault, so this is belt-and-braces, but it
+    is the in-app DPDP guarantee. Verify on device: erase → reopen → clean first-run,
+    old master password no longer unlocks anything.
 
 ## OV-5 OneVault theme — "Paper Ledger" (USER-SELECTED 2026-07-04, replaces steel&brass)
 Current: stock M3 blue (`GeoPrimary #0061A4`). Replace with the private-banker's-ledger
