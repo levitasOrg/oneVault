@@ -415,6 +415,54 @@ fun SettingsMenuTab(viewModel: VaultViewModel) {
 
             Spacer(modifier = Modifier.height(16.dp))
 
+            // 1b. Crash reporting (GP-1) — opt-in, off by default.
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                val crashReportsEnabled by viewModel.crashReportsEnabled.collectAsStateWithLifecycle()
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        text = "🐞 Crash reporting",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 15.sp,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Text(
+                        text = "Off by default. When on, only anonymised crash diagnostics are sent — never your vault, passwords, or activity.",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 4.dp, bottom = 12.dp),
+                        lineHeight = 16.sp
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Share crash reports", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Switch(
+                            checked = crashReportsEnabled,
+                            onCheckedChange = { enabled ->
+                                viewModel.setCrashReportsEnabled(enabled)
+                            },
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = MaterialTheme.colorScheme.primary,
+                                checkedTrackColor = MaterialTheme.colorScheme.primaryContainer,
+                                uncheckedThumbColor = MaterialTheme.colorScheme.outline,
+                                uncheckedTrackColor = MaterialTheme.colorScheme.surfaceVariant
+                            )
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
             // 2. Android Native Autofill Card Setup
             Card(
                 modifier = Modifier.fillMaxWidth(),

@@ -18,6 +18,11 @@ android {
     versionName = "1.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+    // GP-1: crash-reporting DSN, compiled in only for provisioned release builds
+    // (pass SENTRY_DSN in the environment). Empty ⇒ crash reporting can never
+    // initialise regardless of the opt-in toggle. See CrashReporting.kt.
+    buildConfigField("String", "SENTRY_DSN", "\"${System.getenv("SENTRY_DSN") ?: ""}\"")
   }
 
   signingConfigs {
@@ -104,6 +109,10 @@ dependencies {
   implementation(libs.androidx.sqlite.ktx)
   // Vetted post-quantum KEM (ML-KEM / Kyber) — replaces the homerolled lattice math for new (v3) payloads.
   implementation(libs.bouncycastle.bcprov)
+  // GP-1 crash reporting. OFF by default and only initialised after explicit
+  // opt-in (CrashReporting) — a password manager must never phone home silently.
+  // NOTE: this SDK merges the INTERNET permission into the manifest.
+  implementation(libs.sentry.android)
   // implementation(libs.coil.compose)
   implementation(libs.converter.moshi)
   // implementation(libs.firebase.ai)

@@ -5,6 +5,7 @@
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
 
     <application
+        android:name=".OneVaultApp"
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
@@ -13,6 +14,10 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.MyApplication">
+
+        <!-- GP-1: never auto-start Sentry. Crash reporting is opt-in and is only
+             ever initialised from CrashReporting after the user enables it. -->
+        <meta-data android:name="io.sentry.auto-init" android:value="false" />
 
         <!-- Custom Post-Quantum Password Autofill Service -->
         <service

@@ -67,6 +67,22 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
     private val _isBiometricEnabled = MutableStateFlow(prefs.getBoolean("biometric_enabled", false))
     val isBiometricEnabled: StateFlow<Boolean> = _isBiometricEnabled.asStateFlow()
 
+    // GP-1 crash reporting: OFF by default. Enabling starts Sentry immediately
+    // (com.example.CrashReporting); it still no-ops unless a DSN was compiled in.
+    private val _crashReportsEnabled =
+        MutableStateFlow(prefs.getBoolean(com.example.CrashReporting.PREF_KEY, false))
+    val crashReportsEnabled: StateFlow<Boolean> = _crashReportsEnabled.asStateFlow()
+
+    fun setCrashReportsEnabled(enabled: Boolean) {
+        com.example.CrashReporting.setEnabled(getApplication(), enabled)
+        _crashReportsEnabled.value = enabled
+        _feedbackMessage.value = if (enabled) {
+            "Crash reporting on — anonymised crash data helps fix bugs. No vault content is ever sent."
+        } else {
+            "Crash reporting off."
+        }
+    }
+
     fun setBiometricEnabled(enabled: Boolean) {
         prefs.edit().putBoolean("biometric_enabled", enabled).apply()
         _isBiometricEnabled.value = enabled
