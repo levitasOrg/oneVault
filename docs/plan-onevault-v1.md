@@ -74,24 +74,28 @@ Audit each; implement what's missing; each gets a manual device-pass line in the
 10. **Search** across decrypted fields (#34 done) — verify perf with 500 items (must
     stay <200 ms; if not, memoize decrypted index while unlocked).
 
-## OV-5 OneVault theme — "steel & brass" (final visual identity)
-Current: stock M3 blue (`GeoPrimary #0061A4`), light-leaning. Replace with a considered
+## OV-5 OneVault theme — "Paper Ledger" (USER-SELECTED 2026-07-04, replaces steel&brass)
+Current: stock M3 blue (`GeoPrimary #0061A4`). Replace with the private-banker's-ledger
 system — **no purple, no green** (standing user preference across all apps):
-- Light: bg `#F6F7F8` (cool steel paper), surface `#FFFFFF`, onBg `#171A1D`,
-  primary `#2F4A5E` (gunmetal blue-steel), secondary container `#E4E9ED`,
-  accent/tertiary `#B08A3E` (brass — reserved for unlock/success moments),
-  error `#B3402E`, outline `#D8DDE2`.
-- Dark: bg `#121417`, surface `#1B1E22`, onBg `#ECEEF0`, primary `#8FB0C6`,
-  primaryContainer `#25384633`→use `#253846`, accent `#D4AF6A`, outline `#2C3238`.
-- `dynamicColor = false` (brand consistency); both themes wired through
-  `ui/theme/{Color,Theme}.kt`; every screen checked in BOTH modes (the split screens
-  hardcode zero colors — verify with a grep for `Color(0x` outside ui/theme, fix hits).
-- Typography: keep system fonts; titles 700, `titleLarge` tightened −0.2sp.
-- **App icon**: vault-door motif — brass dial ring on gunmetal rounded square, steel
-  paper backdrop. SVG → 1024 PNG via `qlmanage -t -s 1024 -o . icon.svg`, adaptive
-  foreground + monochrome layer (Android 13 themed icons).
-- Lock screen gets the one brand moment: brass dial rotates on successful unlock
-  (≤300 ms, respect reduced-motion by skipping).
+- Light: bg `#FAF6EE` (warm paper), surface `#FFFFFF`, onBg `#241F1A` (ledger ink),
+  primary `#8C2F23` (oxblood), primaryContainer `#F3E4E0`, tertiary/accent `#C9A227`
+  (old gold — reserved for unlock/success moments), secondaryContainer `#EFE8D8`,
+  muted text `#7A7264`, error `#B3402E`, outline `#E5DCC9`.
+- Dark ("midnight ledger"): bg `#171310`, surface `#201B16`, onBg `#EDE6D9`,
+  primary `#C05A4B` (lifted oxblood), primaryContainer `#3A231E`, accent `#D9B34A`,
+  muted `#9A9184`, outline `#33291F`.
+- **Wordmark** (code component like Reyy's, in `ui/components/`): "One" roman 800 ink +
+  "Vault" italic 400 oxblood + an outlined padlock glyph with an oxblood keyhole dot;
+  used on lock screen (large, centered) and dashboard top bar (small).
+- `dynamicColor = false`; both themes wired through `ui/theme/{Color,Theme}.kt`; every
+  screen checked in BOTH modes (grep `Color(0x` outside ui/theme, fix hits).
+- Typography: system fonts; titles 700–800; the italicized "Vault" is styled spans, not
+  a font asset (custom display font optional later via Compose FontFamily).
+- **App icon**: ledger-book motif — warm-paper rounded square, ink-outlined book/lock
+  hybrid with oxblood spine and gold keyhole dot. SVG → 1024 PNG via
+  `qlmanage -t -s 1024 -o . icon.svg`, adaptive foreground + monochrome layer.
+- Lock screen brand moment: the gold keyhole dot turns like a key on successful unlock
+  (≤300 ms, skipped under reduced-motion).
 
 ## OV-6 Hardening for real users
 1. `android:allowBackup="false"` + `dataExtractionRules` excluding everything (Keystore
@@ -144,10 +148,14 @@ screenshots blocked (FLAG_SECURE) but Play screenshots need debug flavor with fl
 root warning shown once per unlock, not nagging.
 
 ## CT — Commuter apps theme audit (same session or after OneVault)
-- **CT-1 Slowbeat**: has light "porcelain & tide" only — add a dark variant with the
-  same tokens (`src/theme.ts`; porcelain→`#15171A`, card `#1E2126`, tide blue lifts to
-  `#5E9BC8`, terracotta stays), theme switch identical to Reyy's (Auto/Light/Dark pill,
-  reuse Reyy's `ThemeContext.tsx` pattern). Verify every screen; typecheck; commit.
+- **CT-1 Slowbeat (USER-SELECTED 2026-07-04: "Porcelain & Tide+", option A)**: keep the
+  shipped palette, add craft + dark mode. (a) Wordmark code component (like Reyy's
+  `Wordmark.tsx`): "Slow" 800 ink + "beat" 300 tide blue + terracotta pulse dot, plus a
+  thin underline carrying one heartbeat blip; used on auth (large) and as the Routes
+  header brand. (b) Dark variant, same tokens: porcelain→`#15171A`, card `#1E2126`,
+  tide blue lifts to `#5E9BC8`, terracotta stays `#DB6B4F`, ochre `#C99B4A`, borders
+  `#2A2E33`. (c) Theme switch identical to Reyy's (Auto/Light/Dark pill — port
+  `ThemeContext.tsx`). Verify every screen both modes; typecheck; commit.
 - **CT-2 Reyy**: Pop Radio is committed; audit only — contrast of `#6b6b6b` on cream
   (borderline; bump to `#5E5E5E` if <4.5:1), the muted color in dark (`#A5A099` ok),
   and confirm `usesCleartextTraffic` + `BUILD.devAuth` are OFF in any store build

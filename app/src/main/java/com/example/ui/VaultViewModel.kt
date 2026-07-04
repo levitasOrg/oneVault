@@ -70,7 +70,14 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
     fun setBiometricEnabled(enabled: Boolean) {
         prefs.edit().putBoolean("biometric_enabled", enabled).apply()
         _isBiometricEnabled.value = enabled
-        if (!enabled) {
+        if (enabled) {
+            // Re-persist the currently-unlocked master password so biometric unlock has
+            // something to return. Without this, toggling biometrics on from Settings flips
+            // the flag but leaves SecureStore empty (a prior toggle-off removed it), so the
+            // fingerprint prompt succeeds yet yields a null password. The setup path also
+            // calls saveBiometricPassword() explicitly, so this is safe/idempotent there.
+            VaultSession.getActivePassword()?.let { secureStore.putString("biometric_password", it) }
+        } else {
             secureStore.remove("biometric_password")
         }
     }
