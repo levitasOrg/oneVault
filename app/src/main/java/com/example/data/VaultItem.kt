@@ -22,6 +22,11 @@ data class DecryptedFields(
     val username: String = "",
     val secretText: String = "", // Password or note body
     val website: String = "",
+
+    // Two-factor (TOTP) — base32 secret from an authenticator "otpauth://" QR.
+    // Stored encrypted like every other field; the live 6/8-digit code is derived
+    // on the fly (see com.example.totp.Totp). Blank ⇒ item has no 2FA.
+    val totpSecret: String = "",
     
     // Credit card fields
     val cardNumber: String = "",

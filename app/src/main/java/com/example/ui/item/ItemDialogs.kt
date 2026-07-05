@@ -288,6 +288,24 @@ fun ItemManageDialog(
                         }
                         Spacer(modifier = Modifier.height(12.dp))
                         OutlinedTextField(
+                            value = fields.totpSecret,
+                            onValueChange = { fields = fields.copy(totpSecret = it) },
+                            label = { Text("Two-Factor (TOTP) Secret — optional") },
+                            singleLine = true,
+                            isError = fields.totpSecret.isNotBlank() &&
+                                !com.example.totp.Totp.isValidSecret(fields.totpSecret),
+                            supportingText = {
+                                val bad = fields.totpSecret.isNotBlank() &&
+                                    !com.example.totp.Totp.isValidSecret(fields.totpSecret)
+                                Text(
+                                    if (bad) "Not a valid base32 authenticator secret."
+                                    else "Paste the base32 setup key from your authenticator app.",
+                                    fontSize = 10.sp,
+                                )
+                            },
+                            modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
+                        )
+                        OutlinedTextField(
                             value = fields.customNotes,
                             onValueChange = { fields = fields.copy(customNotes = it) },
                             label = { Text("Notes") },
@@ -568,6 +586,9 @@ fun ItemDetailDialog(
                             }
                             ClipboardDisplayRow("Username/Email", decryptedFields.username, clipboardManager)
                             SensitiveClipboardDisplayRow("Password", decryptedFields.secretText, clipboardManager)
+                            if (decryptedFields.totpSecret.isNotBlank()) {
+                                com.example.ui.components.TotpCodeRow(decryptedFields.totpSecret)
+                            }
                         }
                         "CARD" -> {
                             SensitiveClipboardDisplayRow("Card Number", decryptedFields.cardNumber, clipboardManager)

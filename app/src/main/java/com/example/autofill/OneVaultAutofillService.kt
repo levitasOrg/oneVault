@@ -19,6 +19,7 @@ import com.example.crypto.VaultSession
 import com.example.data.AppDatabase
 import com.example.data.DecryptedFields
 import com.example.data.VaultItem
+import com.example.totp.Totp
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
 import kotlinx.coroutines.CoroutineScope
@@ -40,12 +41,13 @@ class OneVaultAutofillService : AutofillService() {
         val contexts = request.fillContexts
         val structure = contexts[contexts.size - 1].structure
 
-        // 1. Identify current username and password fields in the screen's AssistStructure
+        // 1. Identify current username, password and one-time-code fields in the AssistStructure
         val targets = findAutofillFields(structure)
         val uId = targets.usernameId
         val pId = targets.passwordId
+        val oId = targets.otpId
 
-        if (uId == null && pId == null) {
+        if (uId == null && pId == null && oId == null) {
             callback.onSuccess(null)
             return
         }
@@ -74,12 +76,15 @@ class OneVaultAutofillService : AutofillService() {
                     if (pId != null) {
                         dataset.setValue(pId, null, presentation)
                     }
+                    if (oId != null) {
+                        dataset.setValue(oId, null, presentation)
+                    }
                     responseBuilder.addDataset(dataset.build())
                 } else {
                     // Vault is unlocked. Decrypt logins and rank them by how well they match the
                     // requesting app/site. Only matching credentials are offered, so a Netflix
                     // login is never shown on a Google sign-in form.
-                    val candidates = mutableListOf<Pair<Int, Triple<String, String, String>>>() // score to (title, user, pass)
+                    val candidates = mutableListOf<Pair<Int, Candidate>>() // score to candidate
                     for (item in allItems) {
                         if (item.category != "LOGIN") continue
                         try {
@@ -87,13 +92,14 @@ class OneVaultAutofillService : AutofillService() {
                             val fields = fieldsAdapter.fromJson(decryptedStr) ?: continue
                             val usernameVal = fields.username
                             val passwordVal = fields.secretText
-                            if (usernameVal.isEmpty() && passwordVal.isEmpty()) continue
+                            val totpVal = fields.totpSecret
+                            if (usernameVal.isEmpty() && passwordVal.isEmpty() && totpVal.isEmpty()) continue
 
                             val score = matchScore(requestingContext, item.website, item.title, fields.website)
                             // Drop non-matches when we actually know the requesting context. If we
                             // could not determine any context, fall back to showing everything.
                             if (requestingContext.isNotEmpty() && score <= 0) continue
-                            candidates.add(score to Triple(item.title, usernameVal, passwordVal))
+                            candidates.add(score to Candidate(item.title, usernameVal, passwordVal, totpVal))
                         } catch (e: Exception) {
                             // Master password may have changed or decryption failed
                         }
@@ -101,16 +107,35 @@ class OneVaultAutofillService : AutofillService() {
 
                     candidates.sortByDescending { it.first }
                     for ((_, cred) in candidates.take(3)) {
-                        val (title, usernameVal, passwordVal) = cred
+                        // The current TOTP code, computed at request time. Valid for the remaining
+                        // seconds of its 30s window — long enough for the user to tap the dataset.
+                        val otpCode = if (oId != null && cred.totpSecret.isNotBlank() &&
+                            Totp.isValidSecret(cred.totpSecret)
+                        ) {
+                            Totp.currentCode(cred.totpSecret)
+                        } else ""
+
+                        val label = when {
+                            oId != null && otpCode.isNotEmpty() && uId == null && pId == null ->
+                                "🔑 OneVault: ${cred.title} — 2FA code"
+                            else -> "🔑 OneVault: ${cred.title} (${cred.username})"
+                        }
                         val presentation = RemoteViews(packageName, android.R.layout.simple_list_item_1).apply {
-                            setTextViewText(android.R.id.text1, "🔑 OneVault: $title ($usernameVal)")
+                            setTextViewText(android.R.id.text1, label)
                         }
                         val dataset = Dataset.Builder()
                         if (uId != null) {
-                            dataset.setValue(uId, AutofillValue.forText(usernameVal), presentation)
+                            dataset.setValue(uId, AutofillValue.forText(cred.username), presentation)
                         }
                         if (pId != null) {
-                            dataset.setValue(pId, AutofillValue.forText(passwordVal), presentation)
+                            dataset.setValue(pId, AutofillValue.forText(cred.password), presentation)
+                        }
+                        if (oId != null && otpCode.isNotEmpty()) {
+                            dataset.setValue(oId, AutofillValue.forText(otpCode), presentation)
+                        } else if (oId != null && uId == null && pId == null) {
+                            // OTP-only form but this candidate has no TOTP secret: skip it so we
+                            // never offer an empty dataset.
+                            continue
                         }
                         responseBuilder.addDataset(dataset.build())
                     }
@@ -248,9 +273,35 @@ class OneVaultAutofillService : AutofillService() {
         return parts.filterNot { it in ignore }.maxByOrNull { it.length } ?: ""
     }
 
+    /** The standard Android OTP autofill hint (`AUTOFILL_HINT_SMS_OTP`) plus common variants. */
+    private fun isOtpHint(hint: String): Boolean {
+        val h = hint.lowercase()
+        return h == "smsotpcode" || h.contains("otp") || h.contains("2fa") || h.contains("mfa")
+    }
+
+    /**
+     * Heuristic OTP detection for resource-id / hint text. Deliberately conservative: matches only
+     * distinctive one-time-code tokens, never a bare "code" (which also means zip/promo/CVV codes).
+     */
+    private fun isOtpToken(value: String): Boolean {
+        val v = value.lowercase().replace("_", "").replace("-", "").replace(" ", "")
+        val tokens = listOf("otp", "totp", "2fa", "mfa", "onetimecode", "onetimepass",
+            "verificationcode", "verifycode", "authcode", "twofactor")
+        return tokens.any { v.contains(it) }
+    }
+
     private data class AutofillTargets(
         var usernameId: AutofillId? = null,
-        var passwordId: AutofillId? = null
+        var passwordId: AutofillId? = null,
+        var otpId: AutofillId? = null
+    )
+
+    /** A decrypted login offered for autofill. [totpSecret] blank ⇒ no 2FA on this item. */
+    private data class Candidate(
+        val title: String,
+        val username: String,
+        val password: String,
+        val totpSecret: String
     )
 
     private fun findAutofillFields(structure: AssistStructure): AutofillTargets {
@@ -273,6 +324,8 @@ class OneVaultAutofillService : AutofillService() {
                     targets.usernameId = node.autofillId
                 } else if (hint.contains("password", ignoreCase = true)) {
                     targets.passwordId = node.autofillId
+                } else if (isOtpHint(hint)) {
+                    targets.otpId = node.autofillId
                 }
             }
         }
@@ -285,6 +338,8 @@ class OneVaultAutofillService : AutofillService() {
                 if (targets.usernameId == null) targets.usernameId = node.autofillId
             } else if (idEntry.contains("password", ignoreCase = true) || idEntry.contains("passwd", ignoreCase = true)) {
                 if (targets.passwordId == null) targets.passwordId = node.autofillId
+            } else if (isOtpToken(idEntry)) {
+                if (targets.otpId == null) targets.otpId = node.autofillId
             }
         }
 
@@ -293,6 +348,8 @@ class OneVaultAutofillService : AutofillService() {
                 if (targets.usernameId == null) targets.usernameId = node.autofillId
             } else if (hintText.contains("password", ignoreCase = true)) {
                 if (targets.passwordId == null) targets.passwordId = node.autofillId
+            } else if (isOtpToken(hintText)) {
+                if (targets.otpId == null) targets.otpId = node.autofillId
             }
         }
 
